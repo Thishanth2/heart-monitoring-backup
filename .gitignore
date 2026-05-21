@@ -118,4 +118,8 @@ hardware/thermal/saved_thermal_images/
 !package.json
 !package-lock.json
 !tsconfig.json
+<<<<<<< HEAD
 !firebase.json
+=======
+!firebase.json
+>>>>>>> 6f99c7e1702300d6344fe84d58299fe60627b167
