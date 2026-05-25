@@ -17,7 +17,7 @@ export default function QuestionnairePage() {
     painStart: "",
     suddenOrGradual: "",
     activityAtTime: "",
-    painRadiation: "",
+    painRadiation: [] as string[],
     painDuration: "",
     hadBefore: "",
     symptoms: [] as string[],
@@ -34,7 +34,10 @@ export default function QuestionnairePage() {
 
   const risk = useMemo(() => calculateRisk(form), [form]);
 
-  const handleCheckbox = (field: "symptoms" | "medicalHistory", value: string) => {
+  const handleCheckbox = (
+    field: "symptoms" | "medicalHistory" | "painRadiation",
+    value: string
+  ) => {
     const current = form[field];
 
     if (current.includes(value)) {
@@ -68,7 +71,6 @@ export default function QuestionnairePage() {
       localStorage.setItem("patientName", form.name);
       localStorage.setItem("questionnaireRisk", JSON.stringify(risk));
 
-      alert("Questionnaire saved successfully.");
       router.push("/measurement");
     } catch (error) {
       console.error(error);
@@ -141,13 +143,6 @@ export default function QuestionnairePage() {
             onChange={(v) => setForm({ ...form, activityAtTime: v })}
           />
 
-          <Select
-            label="Does the pain go to arm, neck or jaw?"
-            value={form.painRadiation}
-            options={["No", "Left arm", "Right arm", "Neck", "Jaw", "Back"]}
-            onChange={(v) => setForm({ ...form, painRadiation: v })}
-          />
-
           <Input
             label="How long does it last?"
             placeholder="Example: 5 minutes, 30 minutes..."
@@ -204,6 +199,13 @@ export default function QuestionnairePage() {
             onChange={(v) => setForm({ ...form, painNow: v })}
           />
         </div>
+
+        <CheckboxGroup
+          title="Does the pain go to:"
+          options={["No", "Left arm", "Right arm", "Neck", "Jaw", "Back", "Shoulder"]}
+          selected={form.painRadiation}
+          onChange={(v) => handleCheckbox("painRadiation", v)}
+        />
 
         <CheckboxGroup
           title="Do you have symptoms like:"
@@ -289,9 +291,13 @@ function calculateRisk(form: any) {
     reasons.push("Mild pain right now");
   }
 
-  if (["Left arm", "Neck", "Jaw", "Back"].includes(form.painRadiation)) {
+  if (
+    form.painRadiation?.some((item: string) =>
+      ["Left arm", "Right arm", "Neck", "Jaw", "Back", "Shoulder"].includes(item)
+    )
+  ) {
     score += 15;
-    reasons.push("Pain spreading to arm/neck/jaw/back");
+    reasons.push("Pain spreading to arm/neck/jaw/back/shoulder");
   }
 
   if (form.suddenOrGradual === "Sudden") {
@@ -300,6 +306,7 @@ function calculateRisk(form: any) {
   }
 
   const painScale = Number(form.painScale);
+
   if (painScale >= 8) {
     score += 15;
     reasons.push("High pain score");
@@ -405,10 +412,7 @@ function RiskCard({ risk }: { risk: any }) {
       </div>
 
       <div className="mt-3 h-3 w-full rounded-full bg-white">
-        <div
-          className={`h-3 rounded-full ${risk.bar}`}
-          style={{ width: `${risk.percentage}%` }}
-        />
+        <div className={`h-3 rounded-full ${risk.bar}`} style={{ width: `${risk.percentage}%` }} />
       </div>
 
       <p className="mt-3 text-xs font-semibold">
@@ -433,9 +437,7 @@ function Input({
 }) {
   return (
     <div>
-      <label className="mb-2 block text-base font-bold text-gray-900">
-        {label}
-      </label>
+      <label className="mb-2 block text-base font-bold text-gray-900">{label}</label>
       <input
         type={type}
         value={value}
@@ -460,9 +462,7 @@ function Select({
 }) {
   return (
     <div>
-      <label className="mb-2 block text-base font-bold text-gray-900">
-        {label}
-      </label>
+      <label className="mb-2 block text-base font-bold text-gray-900">{label}</label>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}

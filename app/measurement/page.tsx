@@ -2,8 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 
 type SensorData = {
+  patientName?: string;
   measurementStatus?: string;
   message?: string;
   countdown?: number;
@@ -13,21 +16,17 @@ type SensorData = {
   heartRate?: number;
   spo2?: number;
   perfusionIndex?: number;
-  avgTemp?: number;
-  maxTemp?: number;
-  minTemp?: number;
-  deltaTemp?: number;
 };
 
 const BACKEND_URL = "http://10.54.16.137:5000/api/latest-sensor";
 
 export default function MeasurementPage() {
   const router = useRouter();
-
   const lastMaxData = useRef<SensorData | null>(null);
 
   const [data, setData] = useState<SensorData | null>(null);
   const [status, setStatus] = useState("Waiting for MAX30102 sensor data...");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -37,7 +36,6 @@ export default function MeasurementPage() {
 
         if (!latest || !latest.measurementStatus) return;
 
-        // IMPORTANT: ignore thermal_live on MAX30102 page
         if (latest.measurementStatus === "thermal_live") {
           if (lastMaxData.current) {
             setData(lastMaxData.current);
@@ -60,6 +58,33 @@ export default function MeasurementPage() {
   const isCompleted = data?.measurementStatus === "completed";
   const isMeasuring = data?.measurementStatus === "measuring";
   const isWaiting = data?.measurementStatus === "waiting";
+
+  const saveAndContinue = async () => {
+    if (!data || !isCompleted) return;
+
+    try {
+      setSaving(true);
+
+      await addDoc(collection(db, "sensor_readings"), {
+        patientName: data.patientName ?? "Unknown",
+        measurementStatus: data.measurementStatus,
+        fingerStatus: data.fingerStatus ?? "",
+        redValue: data.redValue ?? 0,
+        irValue: data.irValue ?? 0,
+        heartRate: data.heartRate ?? 0,
+        spo2: data.spo2 ?? 0,
+        perfusionIndex: data.perfusionIndex ?? 0,
+        createdAt: serverTimestamp(),
+      });
+
+      router.push("/thermal-processing");
+    } catch (error) {
+      console.error(error);
+      alert("Failed to save MAX30102 result.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-slate-100 p-6">
@@ -105,17 +130,6 @@ export default function MeasurementPage() {
           <Card title="IR Value" value={data?.irValue ?? 0} />
         </div>
 
-        <h2 className="mt-8 text-2xl font-bold text-gray-800">
-          Thermal Summary
-        </h2>
-
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <Card title="Average Temperature" value={`${data?.avgTemp ?? 0} °C`} />
-          <Card title="Max Temperature" value={`${data?.maxTemp ?? 0} °C`} />
-          <Card title="Min Temperature" value={`${data?.minTemp ?? 0} °C`} />
-          <Card title="Delta Temperature" value={`${data?.deltaTemp ?? 0} °C`} />
-        </div>
-
         <div className="mt-8 flex flex-col gap-3 md:flex-row">
           <button
             onClick={() => router.push("/questionnaire")}
@@ -125,18 +139,11 @@ export default function MeasurementPage() {
           </button>
 
           <button
-            onClick={() => router.push("/thermal-processing")}
-            disabled={!isCompleted}
+            onClick={saveAndContinue}
+            disabled={!isCompleted || saving}
             className="w-full rounded-xl bg-red-600 p-4 font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-400"
           >
-            Continue to Thermal Processing
-          </button>
-
-          <button
-            onClick={() => router.push("/final-result")}
-            className="w-full rounded-xl bg-green-600 p-4 font-bold text-white hover:bg-green-700"
-          >
-            View Final Result
+            {saving ? "Saving..." : "Save & Continue to Thermal Processing"}
           </button>
         </div>
       </div>
