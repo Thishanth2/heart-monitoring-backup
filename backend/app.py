@@ -7,6 +7,8 @@ from firebase_admin import credentials, firestore
 app = Flask(__name__)
 CORS(app)
 
+latest_sensor_data = {}
+
 if not firebase_admin._apps:
     cred = credentials.Certificate(
         r"d:\heart-monitoring-backup\backend\serviceAccountKey.json"
@@ -23,6 +25,8 @@ def home():
 
 @app.route("/api/sensor", methods=["POST"])
 def sensor_data():
+    global latest_sensor_data
+
     try:
         data = request.get_json()
 
@@ -32,13 +36,19 @@ def sensor_data():
                 "error": "No sensor data received"
             }), 400
 
-        data["createdAt"] = firestore.SERVER_TIMESTAMP
+        latest_sensor_data = data
 
-        db.collection("sensor_readings").add(data)
+        # Save ONLY final MAX30102 reading to Firebase
+        if data.get("measurementStatus") == "completed":
+            save_data = data.copy()
+            save_data.pop("thermalPixels", None)
+            save_data["createdAt"] = firestore.SERVER_TIMESTAMP
+
+            db.collection("sensor_readings").add(save_data)
 
         return jsonify({
             "success": True,
-            "message": "Sensor data saved"
+            "message": "Live data received"
         }), 200
 
     except Exception as e:
@@ -48,31 +58,9 @@ def sensor_data():
         }), 500
 
 
-@app.route("/api/thermal-frame", methods=["POST"])
-def thermal_frame():
-    try:
-        data = request.get_json()
-
-        if data is None:
-            return jsonify({
-                "success": False,
-                "error": "No thermal frame received"
-            }), 400
-
-        data["createdAt"] = firestore.SERVER_TIMESTAMP
-
-        db.collection("thermal_frames").add(data)
-
-        return jsonify({
-            "success": True,
-            "message": "Thermal frame saved"
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+@app.route("/api/latest-sensor", methods=["GET"])
+def latest_sensor():
+    return jsonify(latest_sensor_data), 200
 
 
 @app.route("/api/thermal-result", methods=["POST"])
@@ -88,6 +76,7 @@ def thermal_result():
 
         data["createdAt"] = firestore.SERVER_TIMESTAMP
 
+        # Save ONLY final ROI result to Firebase
         db.collection("thermal_results").add(data)
 
         return jsonify({

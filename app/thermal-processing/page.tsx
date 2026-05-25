@@ -1,72 +1,65 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { collection, onSnapshot } from "firebase/firestore";
 import { useRouter } from "next/navigation";
-import { db } from "@/lib/firebase";
 
 type SensorData = {
   patientName?: string;
   measurementStatus?: string;
+  thermalPixels?: number[];
   avgTemp?: number;
   maxTemp?: number;
   minTemp?: number;
   deltaTemp?: number;
-  thermalPixels?: number[];
-};
-
-type RoiResult = {
-  fingertipTemp: number;
-  palmTemp: number;
-  deltaT: number;
-  circulationStatus: string;
 };
 
 export default function ThermalProcessingPage() {
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  const latestFrameRef = useRef<SensorData | null>(null);
+
   const [data, setData] = useState<SensorData | null>(null);
-  const [roiResult, setRoiResult] = useState<RoiResult | null>(null);
-  const [selectedPoints, setSelectedPoints] = useState<{ x: number; y: number }[]>([]);
-  const [status, setStatus] = useState("Waiting for thermal data from Pico...");
+  const [roiPoints, setRoiPoints] = useState<{ row: number; col: number }[]>([]);
+  const [result, setResult] = useState<any>(null);
+  const [status, setStatus] = useState("Waiting for thermal camera data...");
 
   useEffect(() => {
-    const unsubscribe = onSnapshot(
-      collection(db, "sensor_readings"),
-      (snapshot) => {
-        if (snapshot.empty) {
-          setStatus("No sensor data found.");
-          return;
-        }
-
-        let latest: SensorData | null = null;
-
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === "added" || change.type === "modified") {
-            latest = change.doc.data() as SensorData;
-          }
-        });
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch("http://10.54.16.137:5000/api/latest-sensor");
+        const latest = await res.json();
 
         if (latest?.thermalPixels && latest.thermalPixels.length === 64) {
+          latestFrameRef.current = latest;
           setData(latest);
           setStatus("Live thermal camera active");
         }
-      },
-      (error) => {
-        setStatus("Firebase error: " + error.message);
+      } catch {
+        setStatus("Backend not connected");
       }
-    );
+    }, 300);
 
-    return () => unsubscribe();
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
-    drawThermal();
-  }, [data, selectedPoints]);
+    let animationId: number;
 
-  function drawThermal() {
-    if (!data?.thermalPixels) return;
+    const animate = () => {
+      drawCanvas();
+      animationId = requestAnimationFrame(animate);
+    };
+
+    animate();
+
+    return () => cancelAnimationFrame(animationId);
+  }, [roiPoints, result]);
+
+  function drawCanvas() {
+    const frame = latestFrameRef.current;
+
+    if (!frame?.thermalPixels) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -75,88 +68,90 @@ export default function ThermalProcessingPage() {
     if (!ctx) return;
 
     const size = 400;
-    const cell = size / 8;
-
     canvas.width = size;
     canvas.height = size;
 
-    const pixels = data.thermalPixels;
+    const pixels = frame.thermalPixels;
     const min = Math.min(...pixels);
     const max = Math.max(...pixels);
 
-    for (let row = 0; row < 8; row++) {
-      for (let col = 0; col < 8; col++) {
-        const value = pixels[row * 8 + col];
-        const normalized = (value - min) / (max - min || 1);
+    const imageData = ctx.createImageData(size, size);
 
-        ctx.fillStyle = getHeatColor(normalized);
-        ctx.fillRect(col * cell, row * cell, cell, cell);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const gx = (x / size) * 7;
+        const gy = (y / size) * 7;
+
+        const temp = bilinearInterpolate(pixels, gx, gy);
+        const normalized = (temp - min) / (max - min || 1);
+        const [r, g, b] = getHeatRGB(normalized);
+
+        const index = (y * size + x) * 4;
+
+        imageData.data[index] = r;
+        imageData.data[index + 1] = g;
+        imageData.data[index + 2] = b;
+        imageData.data[index + 3] = 255;
       }
     }
 
-    drawFingerGuide(ctx);
+    ctx.putImageData(imageData, 0, 0);
 
-    selectedPoints.forEach((point, index) => {
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = index === 0 ? "white" : "cyan";
-      ctx.fill();
-      ctx.strokeStyle = "black";
-      ctx.lineWidth = 2;
-      ctx.stroke();
+    roiPoints.forEach((p, index) => {
+      const cell = size / 8;
+      ctx.strokeStyle = index === 0 ? "white" : "cyan";
+      ctx.lineWidth = 4;
+      ctx.strokeRect(p.col * cell, p.row * cell, cell, cell);
     });
   }
 
-  function handleCanvasClick(event: React.MouseEvent<HTMLCanvasElement>) {
-    if (!data?.thermalPixels) return;
+  const handleCanvasClick = async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const frame = latestFrameRef.current;
 
-    if (selectedPoints.length >= 2) {
-      setSelectedPoints([]);
-      setRoiResult(null);
-      return;
-    }
+    if (!frame?.thermalPixels || result) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const rect = canvas.getBoundingClientRect();
+    const cell = rect.width / 8;
 
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
+    const col = Math.floor((e.clientX - rect.left) / cell);
+    const row = Math.floor((e.clientY - rect.top) / cell);
 
-    const newPoints = [...selectedPoints, { x, y }];
-    setSelectedPoints(newPoints);
+    const newPoints = [...roiPoints, { row, col }];
+    setRoiPoints(newPoints);
+
+    if (newPoints.length === 1) {
+      setStatus("Fingertip selected. Now click palm/bottom area.");
+    }
 
     if (newPoints.length === 2) {
-      calculateRoi(newPoints);
+      const fingertipTemp = getRoiAverage(frame.thermalPixels, newPoints[0].row, newPoints[0].col);
+      const palmTemp = getRoiAverage(frame.thermalPixels, newPoints[1].row, newPoints[1].col);
+      const deltaT = Number((palmTemp - fingertipTemp).toFixed(2));
+      const circulationStatus = getCirculationStatus(deltaT);
+
+      const finalResult = {
+        patientName: frame.patientName || "Unknown",
+        fingertipTemp: Number(fingertipTemp.toFixed(2)),
+        palmTemp: Number(palmTemp.toFixed(2)),
+        deltaT,
+        circulationStatus,
+      };
+
+      setResult(finalResult);
+      setStatus("Thermal measurement completed");
+
+      await fetch("http://10.54.16.137:5000/api/thermal-result", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(finalResult)
+      });
     }
-  }
-
-  function calculateRoi(points: { x: number; y: number }[]) {
-    if (!data?.thermalPixels) return;
-
-    const fingertipTemp = getRoiAverage(data.thermalPixels, points[0].x, points[0].y);
-    const palmTemp = getRoiAverage(data.thermalPixels, points[1].x, points[1].y);
-
-    const deltaT = Number((palmTemp - fingertipTemp).toFixed(2));
-
-    let circulationStatus = "Good circulation";
-
-    if (deltaT > 3) {
-      circulationStatus = "Possible poor circulation";
-    } else if (deltaT > 1.5) {
-      circulationStatus = "Moderate circulation";
-    }
-
-    setRoiResult({
-      fingertipTemp,
-      palmTemp,
-      deltaT,
-      circulationStatus,
-    });
-
-    setStatus("Thermal ROI measurement completed");
-  }
+  };
 
   return (
     <main className="min-h-screen bg-slate-100 p-6 text-gray-900">
@@ -168,26 +163,25 @@ export default function ThermalProcessingPage() {
         <p className="mt-2 font-semibold text-gray-700">{status}</p>
 
         <div className="mt-6 grid gap-6 lg:grid-cols-2">
-          <div className="rounded-xl border bg-black p-4">
+          <div className="rounded-xl bg-black p-4">
             <canvas
               ref={canvasRef}
               onClick={handleCanvasClick}
-              className="mx-auto cursor-crosshair rounded-lg border border-white"
+              className="mx-auto h-[400px] w-[400px] cursor-crosshair rounded-lg"
             />
 
             <p className="mt-3 text-center text-sm font-semibold text-white">
-              Place 4 fingers inside white guides. Click fingertip first, then palm area.
+              Click 1: Fingertip ROI | Click 2: Palm/Bottom ROI
             </p>
           </div>
 
-          <div>
+          <div className="space-y-5">
             <div className="rounded-xl border bg-blue-50 p-5">
               <h2 className="text-xl font-bold text-blue-800">
-                Live Thermal Values
+                Live Thermal Camera
               </h2>
 
               <div className="mt-4 grid gap-3">
-                <Card title="Patient" value={data?.patientName ?? "Waiting"} />
                 <Card title="Minimum Temperature" value={`${data?.minTemp ?? 0} °C`} />
                 <Card title="Maximum Temperature" value={`${data?.maxTemp ?? 0} °C`} />
                 <Card title="Average Temperature" value={`${data?.avgTemp ?? 0} °C`} />
@@ -195,45 +189,44 @@ export default function ThermalProcessingPage() {
               </div>
             </div>
 
-            <div className="mt-5 rounded-xl border bg-green-50 p-5">
+            <div className="rounded-xl border bg-green-50 p-5">
               <h2 className="text-xl font-bold text-green-800">
                 ROI Result
               </h2>
 
               <div className="mt-4 grid gap-3">
-                <Card
-                  title="Fingertip Temperature"
-                  value={`${roiResult?.fingertipTemp ?? 0} °C`}
-                />
-                <Card
-                  title="Palm Temperature"
-                  value={`${roiResult?.palmTemp ?? 0} °C`}
-                />
-                <Card
-                  title="Delta T"
-                  value={`${roiResult?.deltaT ?? 0} °C`}
-                />
-                <Card
-                  title="Circulation Status"
-                  value={roiResult?.circulationStatus ?? "Waiting"}
-                />
+                <Card title="Fingertip Temperature" value={`${result?.fingertipTemp ?? 0} °C`} />
+                <Card title="Palm Temperature" value={`${result?.palmTemp ?? 0} °C`} />
+                <Card title="Delta T" value={`${result?.deltaT ?? 0} °C`} />
+                <Card title="Circulation Status" value={result?.circulationStatus ?? "Waiting"} />
               </div>
             </div>
+
+            <button
+              onClick={() => {
+                setRoiPoints([]);
+                setResult(null);
+                setStatus("Live thermal camera active. Click fingertip ROI first.");
+              }}
+              className="w-full rounded-xl bg-orange-600 p-4 font-bold text-white hover:bg-orange-700"
+            >
+              Reset ROI Selection
+            </button>
           </div>
         </div>
 
         <div className="mt-8 flex flex-col gap-3 md:flex-row">
           <button
             onClick={() => router.push("/measurement")}
-            className="w-full rounded-xl bg-gray-700 p-4 font-bold text-white hover:bg-gray-800"
+            className="w-full rounded-xl bg-gray-700 p-4 font-bold text-white"
           >
             Back to Measurement
           </button>
 
           <button
-            disabled={!roiResult}
+            disabled={!result}
             onClick={() => router.push("/final-result")}
-            className="w-full rounded-xl bg-green-600 p-4 font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:bg-gray-400"
+            className="w-full rounded-xl bg-green-600 p-4 font-bold text-white disabled:bg-gray-400"
           >
             Continue to Final Result
           </button>
@@ -243,52 +236,56 @@ export default function ThermalProcessingPage() {
   );
 }
 
-function getRoiAverage(pixels: number[], x: number, y: number) {
-  const size = 400;
-  const cell = size / 8;
+function bilinearInterpolate(pixels: number[], x: number, y: number) {
+  const x1 = Math.floor(x);
+  const y1 = Math.floor(y);
+  const x2 = Math.min(x1 + 1, 7);
+  const y2 = Math.min(y1 + 1, 7);
 
-  const col = Math.min(7, Math.max(0, Math.floor(x / cell)));
-  const row = Math.min(7, Math.max(0, Math.floor(y / cell)));
+  const q11 = pixels[y1 * 8 + x1];
+  const q21 = pixels[y1 * 8 + x2];
+  const q12 = pixels[y2 * 8 + x1];
+  const q22 = pixels[y2 * 8 + x2];
 
-  const values: number[] = [];
+  const fx = x - x1;
+  const fy = y - y1;
+
+  const top = q11 * (1 - fx) + q21 * fx;
+  const bottom = q12 * (1 - fx) + q22 * fx;
+
+  return top * (1 - fy) + bottom * fy;
+}
+
+function getRoiAverage(pixels: number[], row: number, col: number) {
+  let sum = 0;
+  let count = 0;
 
   for (let r = row - 1; r <= row + 1; r++) {
     for (let c = col - 1; c <= col + 1; c++) {
       if (r >= 0 && r < 8 && c >= 0 && c < 8) {
-        values.push(pixels[r * 8 + c]);
+        sum += pixels[r * 8 + c];
+        count++;
       }
     }
   }
 
-  const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
-  return Number(avg.toFixed(2));
+  return sum / count;
 }
 
-function getHeatColor(value: number) {
-  const r = Math.floor(255 * value);
-  const g = Math.floor(90 * (1 - Math.abs(value - 0.5) * 2));
-  const b = Math.floor(255 * (1 - value));
-
-  return `rgb(${r}, ${g}, ${b})`;
+function getCirculationStatus(deltaT: number) {
+  if (deltaT <= 1.5) return "Good circulation";
+  if (deltaT <= 3) return "Moderate circulation";
+  return "Possible poor circulation";
 }
 
-function drawFingerGuide(ctx: CanvasRenderingContext2D) {
-  ctx.strokeStyle = "white";
-  ctx.lineWidth = 3;
-  ctx.setLineDash([8, 6]);
+function getHeatRGB(value: number): [number, number, number] {
+  const v = Math.max(0, Math.min(1, value));
 
-  const fingers = [95, 165, 235, 305];
+  if (v < 0.25) return [0, Math.floor(255 * v * 4), 255];
+  if (v < 0.5) return [0, 255, Math.floor(255 * (1 - (v - 0.25) * 4))];
+  if (v < 0.75) return [Math.floor(255 * (v - 0.5) * 4), 255, 0];
 
-  fingers.forEach((x) => {
-    ctx.beginPath();
-    ctx.ellipse(x, 100, 25, 75, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  });
-
-  ctx.strokeStyle = "cyan";
-  ctx.strokeRect(65, 235, 270, 110);
-
-  ctx.setLineDash([]);
+  return [255, Math.floor(255 * (1 - (v - 0.75) * 4)), 0];
 }
 
 function Card({ title, value }: { title: string; value: string | number }) {

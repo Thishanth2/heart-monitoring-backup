@@ -1,9 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { collection, onSnapshot } from "firebase/firestore";
-import { db } from "@/lib/firebase";
 
 type SensorData = {
   measurementStatus?: string;
@@ -21,41 +19,42 @@ type SensorData = {
   deltaTemp?: number;
 };
 
+const BACKEND_URL = "http://10.54.16.137:5000/api/latest-sensor";
+
 export default function MeasurementPage() {
   const router = useRouter();
 
+  const lastMaxData = useRef<SensorData | null>(null);
+
   const [data, setData] = useState<SensorData | null>(null);
-  const [status, setStatus] = useState("Waiting for sensor data...");
+  const [status, setStatus] = useState("Waiting for MAX30102 sensor data...");
 
   useEffect(() => {
-    const unsubscribe = onSnapshot(
-      collection(db, "sensor_readings"),
-      (snapshot) => {
-        if (snapshot.empty) {
-          setStatus("No data found");
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(BACKEND_URL);
+        const latest = await res.json();
+
+        if (!latest || !latest.measurementStatus) return;
+
+        // IMPORTANT: ignore thermal_live on MAX30102 page
+        if (latest.measurementStatus === "thermal_live") {
+          if (lastMaxData.current) {
+            setData(lastMaxData.current);
+            setStatus(lastMaxData.current.message ?? "MAX30102 measurement completed");
+          }
           return;
         }
 
-        let latest: SensorData | null = null;
-
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === "added" || change.type === "modified") {
-            latest = change.doc.data() as SensorData;
-          }
-        });
-
-        if (latest) {
-          setData(latest);
-          setStatus(latest.message ?? "Live sensor data received");
-        }
-      },
-      (error) => {
-        console.error(error);
-        setStatus("Firebase error: " + error.message);
+        lastMaxData.current = latest;
+        setData(latest);
+        setStatus(latest.message ?? "Live MAX30102 data received");
+      } catch {
+        setStatus("Backend not connected");
       }
-    );
+    }, 500);
 
-    return () => unsubscribe();
+    return () => clearInterval(interval);
   }, []);
 
   const isCompleted = data?.measurementStatus === "completed";
@@ -86,7 +85,13 @@ export default function MeasurementPage() {
 
           {isCompleted && (
             <p className="text-xl font-bold text-green-600">
-              Measurement completed
+              Measurement completed. You can continue to thermal processing.
+            </p>
+          )}
+
+          {!data && (
+            <p className="text-xl font-bold text-gray-600">
+              Waiting for Pico data...
             </p>
           )}
         </div>
